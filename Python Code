@@ -1,0 +1,554 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, roc_curve
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set random seed for reproducibility
+np.random.seed(42)
+
+# Load the Telco Customer Churn dataset
+file_path ='/content/drive/MyDrive/Data Science Projects/Customer Churn/WA_Fn-UseC_-Telco-Customer-Churn.csv'
+df = pd.read_csv(file_path)
+
+
+# Basic dataset information
+print(f"\nChurn distribution:")
+print(df['Churn'].value_counts())
+print(f"\nChurn rate: {df['Churn'].value_counts(normalize=True)['Yes']:.2%}")
+
+print("\nDataset columns:")
+print(df.columns.tolist())
+
+print("\nFirst few rows:")
+print(df.head())
+
+# Data Exploration and Preprocessing
+print("\n" + "="*60)
+print("DATA EXPLORATION AND PREPROCESSING")
+print("="*60)
+
+# Check data types and missing values
+print("\nDataset Info:")
+print(df.info())
+
+print("\nMissing values:")
+print(df.isnull().sum())
+
+# Check for data quality issues
+print("\nData Quality Check:")
+print("Unique values in key columns:")
+for col in ['gender', 'SeniorCitizen', 'Partner', 'Dependents', 'PhoneService', 'Churn']:
+    print(f"{col}: {df[col].unique()}")
+
+# Check TotalCharges column (known to have issues in this dataset)
+print(f"\nTotalCharges data type: {df['TotalCharges'].dtype}")
+print(f"Sample TotalCharges values: {df['TotalCharges'].head(10).tolist()}")
+
+# Fix TotalCharges column (convert to numeric, handle missing values)
+# Some entries are empty strings instead of NaN
+df['TotalCharges'] = df['TotalCharges'].replace(' ', np.nan)
+df['TotalCharges'] = pd.to_numeric(df['TotalCharges'])
+
+print(f"\nAfter cleaning TotalCharges:")
+print(f"Missing values in TotalCharges: {df['TotalCharges'].isnull().sum()}")
+
+# Handle missing values in TotalCharges
+# For customers with 0 tenure, TotalCharges should be 0
+df.loc[df['tenure'] == 0, 'TotalCharges'] = 0
+
+# For other missing values, use MonthlyCharges * tenure
+missing_mask = df['TotalCharges'].isnull()
+df.loc[missing_mask, 'TotalCharges'] = df.loc[missing_mask, 'MonthlyCharges'] * df.loc[missing_mask, 'tenure']
+
+print(f"Missing values after imputation: {df['TotalCharges'].isnull().sum()}")
+
+# Statistical summary
+print("\nNumerical columns summary:")
+numerical_cols = ['tenure', 'MonthlyCharges', 'TotalCharges']
+print(df[numerical_cols].describe())
+
+# Visualize the data
+plt.figure(figsize=(20, 15))
+
+# Churn distribution
+plt.subplot(3, 4, 1)
+sns.countplot(data=df, x='Churn', palette=['lightblue', 'salmon'])
+plt.title('Churn Distribution')
+for i, v in enumerate(df['Churn'].value_counts()):
+    plt.text(i, v + 50, str(v), ha='center', va='bottom')
+
+# Numerical features vs Churn
+plt.subplot(3, 4, 2)
+sns.boxplot(data=df, x='Churn', y='tenure', palette=['lightblue', 'salmon'])
+plt.title('Tenure vs Churn')
+
+plt.subplot(3, 4, 3)
+sns.boxplot(data=df, x='Churn', y='MonthlyCharges', palette=['lightblue', 'salmon'])
+plt.title('Monthly Charges vs Churn')
+
+plt.subplot(3, 4, 4)
+sns.boxplot(data=df, x='Churn', y='TotalCharges', palette=['lightblue', 'salmon'])
+plt.title('Total Charges vs Churn')
+
+# Categorical features vs Churn
+categorical_features = ['Contract', 'PaymentMethod', 'InternetService', 'gender']
+
+for i, feature in enumerate(categorical_features):
+    plt.subplot(3, 4, 5 + i)
+    churn_rate = df.groupby(feature)['Churn'].apply(lambda x: (x == 'Yes').mean()).sort_values(ascending=False)
+    churn_rate.plot(kind='bar', color='coral')
+    plt.title(f'Churn Rate by {feature}')
+    plt.xticks(rotation=45)
+    plt.ylabel('Churn Rate')
+
+# Senior Citizen vs Churn
+plt.subplot(3, 4, 9)
+churn_by_senior = df.groupby('SeniorCitizen')['Churn'].apply(lambda x: (x == 'Yes').mean())
+churn_by_senior.plot(kind='bar', color='lightgreen')
+plt.title('Churn Rate by Senior Citizen')
+plt.xlabel('Senior Citizen (0=No, 1=Yes)')
+plt.ylabel('Churn Rate')
+
+# Services vs Churn
+services = ['PhoneService', 'MultipleLines', 'OnlineSecurity', 'TechSupport']
+plt.subplot(3, 4, 10)
+service_churn = []
+for service in services:
+    churn_rate = df[df[service] == 'Yes']['Churn'].apply(lambda x: x == 'Yes').mean()
+    service_churn.append(churn_rate)
+
+plt.bar(services, service_churn, color='skyblue')
+plt.title('Churn Rate by Services')
+plt.xticks(rotation=45)
+plt.ylabel('Churn Rate')
+
+# Correlation heatmap for numerical features
+plt.subplot(3, 4, 11)
+df_numeric = df[numerical_cols + ['SeniorCitizen']].copy()
+df_numeric['Churn_binary'] = (df['Churn'] == 'Yes').astype(int)
+correlation_matrix = df_numeric.corr()
+sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', center=0)
+plt.title('Correlation Matrix')
+
+plt.tight_layout()
+plt.show()
+
+# Prepare data for modeling
+print("\n" + "="*60)
+print("DATA PREPARATION FOR MODELING")
+print("="*60)
+
+# Create a copy for preprocessing
+df_model = df.copy()
+
+# Drop customerID as it's not useful for prediction
+df_model = df_model.drop('customerID', axis=1)
+
+# Identify categorical and numerical columns
+categorical_columns = df_model.select_dtypes(include=['object']).columns.tolist()
+categorical_columns.remove('Churn')  # Remove target variable
+numerical_columns = df_model.select_dtypes(include=['int64', 'float64']).columns.tolist()
+
+print(f"Categorical columns: {categorical_columns}")
+print(f"Numerical columns: {numerical_columns}")
+
+# Handle categorical variables with multiple categories
+# For binary categorical variables, convert to 0/1
+binary_mappings = {
+    'gender': {'Male': 1, 'Female': 0},
+    'Partner': {'Yes': 1, 'No': 0},
+    'Dependents': {'Yes': 1, 'No': 0},
+    'PhoneService': {'Yes': 1, 'No': 0},
+    'PaperlessBilling': {'Yes': 1, 'No': 0}
+}
+
+for col, mapping in binary_mappings.items():
+    if col in df_model.columns:
+        df_model[col] = df_model[col].map(mapping)
+
+# Handle multi-category variables with one-hot encoding
+multi_category_cols = []
+for col in categorical_columns:
+    if col not in binary_mappings:
+        multi_category_cols.append(col)
+
+print(f"Multi-category columns for one-hot encoding: {multi_category_cols}")
+
+# Create dummy variables for multi-category features
+if multi_category_cols:
+    df_encoded = pd.get_dummies(df_model, columns=multi_category_cols, drop_first=True)
+else:
+    df_encoded = df_model.copy()
+
+# Convert target variable to binary
+df_encoded['Churn'] = (df_encoded['Churn'] == 'Yes').astype(int)
+
+print(f"\nFinal dataset shape after encoding: {df_encoded.shape}")
+print(f"Final columns: {df_encoded.columns.tolist()}")
+
+# Split features and target
+X = df_encoded.drop('Churn', axis=1)
+y = df_encoded['Churn']
+
+print(f"\nFeature matrix shape: {X.shape}")
+print(f"Target variable shape: {y.shape}")
+print(f"Churn rate: {y.mean():.3f}")
+
+# Split into train and test sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2,
+                                                    random_state=42, stratify=y)
+
+print(f"\nTraining set shape: {X_train.shape}")
+print(f"Test set shape: {X_test.shape}")
+print(f"Training set churn rate: {y_train.mean():.3f}")
+print(f"Test set churn rate: {y_test.mean():.3f}")
+
+# Scale numerical features
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+print("Features scaled successfully!")
+
+# Build Logistic Regression Model
+print("\n" + "="*60)
+print("LOGISTIC REGRESSION MODEL TRAINING")
+print("="*60)
+
+# Train logistic regression model
+lr_model = LogisticRegression(random_state=42, max_iter=1000)
+lr_model.fit(X_train_scaled, y_train)
+
+print("Logistic Regression model trained successfully!")
+
+# Make predictions
+y_pred = lr_model.predict(X_test_scaled)
+y_pred_proba = lr_model.predict_proba(X_test_scaled)[:, 1]
+
+print(f"Predictions completed!")
+print(f"Predicted churn rate: {y_pred.mean():.3f}")
+
+# Model Evaluation
+print("\n" + "="*60)
+print("MODEL EVALUATION")
+print("="*60)
+
+# Calculate metrics
+accuracy = accuracy_score(y_test, y_pred)
+precision = precision_score(y_test, y_pred)
+recall = recall_score(y_test, y_pred)
+f1 = f1_score(y_test, y_pred)
+auc_score = roc_auc_score(y_test, y_pred_proba)
+
+print("Model Performance Metrics:")
+print(f"Accuracy:  {accuracy:.3f} ({accuracy:.1%})")
+print(f"Precision: {precision:.3f} ({precision:.1%})")
+print(f"Recall:    {recall:.3f} ({recall:.1%})")
+print(f"F1-score:  {f1:.3f}")
+print(f"AUC Score: {auc_score:.3f}")
+
+print("\nDetailed Classification Report:")
+print(classification_report(y_test, y_pred, target_names=['No Churn', 'Churn']))
+
+# Visualize model performance
+plt.figure(figsize=(15, 5))
+
+# Confusion Matrix
+plt.subplot(1, 3, 1)
+cm = confusion_matrix(y_test, y_pred)
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+            xticklabels=['No Churn', 'Churn'],
+            yticklabels=['No Churn', 'Churn'])
+plt.title('Confusion Matrix')
+plt.ylabel('Actual')
+plt.xlabel('Predicted')
+
+# ROC Curve
+plt.subplot(1, 3, 2)
+fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
+plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {auc_score:.3f})')
+plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Random')
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('ROC Curve')
+plt.legend(loc="lower right")
+plt.grid(True, alpha=0.3)
+
+# Prediction Probability Distribution
+plt.subplot(1, 3, 3)
+plt.hist(y_pred_proba[y_test == 0], bins=30, alpha=0.7, label='No Churn', color='lightblue')
+plt.hist(y_pred_proba[y_test == 1], bins=30, alpha=0.7, label='Churn', color='salmon')
+plt.xlabel('Predicted Probability of Churn')
+plt.ylabel('Frequency')
+plt.title('Distribution of Predicted Probabilities')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# Feature Importance Analysis
+print("\n" + "="*60)
+print("FEATURE IMPORTANCE ANALYSIS")
+print("="*60)
+
+# Get feature importance (coefficients)
+feature_importance = pd.DataFrame({
+    'feature': X.columns,
+    'coefficient': lr_model.coef_[0],
+    'abs_coefficient': np.abs(lr_model.coef_[0])
+})
+
+feature_importance = feature_importance.sort_values('abs_coefficient', ascending=False)
+
+print("Top 20 Most Important Features:")
+print(feature_importance.head(20).to_string(index=False))
+
+# Plot feature importance
+plt.figure(figsize=(12, 10))
+
+# Top positive coefficients (increase churn probability)
+plt.subplot(1, 2, 1)
+top_positive = feature_importance[feature_importance['coefficient'] > 0].head(10)
+plt.barh(range(len(top_positive)), top_positive['coefficient'], color='red', alpha=0.7)
+plt.yticks(range(len(top_positive)), top_positive['feature'])
+plt.xlabel('Coefficient Value')
+plt.title('Top 10 Features Increasing Churn Risk')
+plt.gca().invert_yaxis()
+
+# Top negative coefficients (decrease churn probability)
+plt.subplot(1, 2, 2)
+top_negative = feature_importance[feature_importance['coefficient'] < 0].head(10)
+plt.barh(range(len(top_negative)), top_negative['coefficient'], color='green', alpha=0.7)
+plt.yticks(range(len(top_negative)), top_negative['feature'])
+plt.xlabel('Coefficient Value')
+plt.title('Top 10 Features Decreasing Churn Risk')
+plt.gca().invert_yaxis()
+
+plt.tight_layout()
+plt.show()
+
+# High-Risk Customer Identification
+print("\n" + "="*60)
+print("HIGH-RISK CUSTOMER IDENTIFICATION")
+print("="*60)
+
+# Define risk categories based on predicted probabilities
+def categorize_risk(prob):
+    if prob >= 0.7:
+        return 'High'
+    elif prob >= 0.4:
+        return 'Medium'
+    else:
+        return 'Low'
+
+# Apply risk categorization
+risk_categories = pd.Series([categorize_risk(prob) for prob in y_pred_proba])
+risk_distribution = risk_categories.value_counts()
+
+print("Risk Distribution:")
+for risk_level in ['Low', 'Medium', 'High']:
+    count = risk_distribution.get(risk_level, 0)
+    percentage = count / len(risk_categories) * 100
+    print(f"{risk_level} Risk: {count} customers ({percentage:.1f}%)")
+
+# Analyze high-risk customers
+high_risk_threshold = 0.7
+high_risk_mask = y_pred_proba >= high_risk_threshold
+high_risk_count = high_risk_mask.sum()
+
+print(f"\nHigh-Risk Customer Analysis (Probability ≥ {high_risk_threshold}):")
+print(f"Number of high-risk customers: {high_risk_count}")
+print(f"Percentage of high-risk customers: {high_risk_count/len(y_pred_proba):.1%}")
+
+if high_risk_count > 0:
+    # Get test set indices for high-risk customers
+    test_indices = X_test.index[high_risk_mask]
+    high_risk_customers = df.loc[test_indices]
+
+    print(f"\nCharacteristics of High-Risk Customers:")
+
+    # Contract analysis
+    print("\nContract Distribution:")
+    contract_dist = high_risk_customers['Contract'].value_counts(normalize=True)
+    for contract, pct in contract_dist.items():
+        print(f"  {contract}: {pct:.1%}")
+
+    # Payment method analysis
+    print("\nPayment Method Distribution:")
+    payment_dist = high_risk_customers['PaymentMethod'].value_counts(normalize=True)
+    for method, pct in payment_dist.items():
+        print(f"  {method}: {pct:.1%}")
+
+    # Numerical characteristics
+    print(f"\nNumerical Characteristics:")
+    print(f"  Average tenure: {high_risk_customers['tenure'].mean():.1f} months")
+    print(f"  Average monthly charges: ${high_risk_customers['MonthlyCharges'].mean():.2f}")
+    print(f"  Average total charges: ${high_risk_customers['TotalCharges'].mean():.2f}")
+    print(f"  Senior citizen percentage: {high_risk_customers['SeniorCitizen'].mean():.1%}")
+
+    # Internet service analysis
+    print(f"\nInternet Service Distribution:")
+    internet_dist = high_risk_customers['InternetService'].value_counts(normalize=True)
+    for service, pct in internet_dist.items():
+        print(f"  {service}: {pct:.1%}")
+
+# Risk Scoring Function for New Customers
+def score_customer_risk(customer_data, model, scaler, feature_columns, binary_mappings):
+    """
+    Score a single customer's churn risk
+
+    Parameters:
+    customer_data: dict with customer information
+    model: trained logistic regression model
+    scaler: fitted StandardScaler
+    feature_columns: list of feature column names from training
+    binary_mappings: dict of mappings for binary variables
+
+    Returns:
+    risk_score: probability of churn (0-1)
+    risk_category: 'Low', 'Medium', 'High'
+    """
+
+    # Convert to DataFrame
+    customer_df = pd.DataFrame([customer_data])
+
+    # Apply binary mappings
+    for col, mapping in binary_mappings.items():
+        if col in customer_df.columns:
+            customer_df[col] = customer_df[col].map(mapping)
+
+    # Create dummy variables for categorical columns
+    categorical_cols = customer_df.select_dtypes(include=['object']).columns.tolist()
+    if categorical_cols:
+        customer_encoded = pd.get_dummies(customer_df, columns=categorical_cols, drop_first=True)
+    else:
+        customer_encoded = customer_df.copy()
+
+    # Ensure all columns are present (add missing columns with 0)
+    for col in feature_columns:
+        if col not in customer_encoded.columns:
+            customer_encoded[col] = 0
+
+    # Reorder columns to match training data
+    customer_encoded = customer_encoded[feature_columns]
+
+    # Scale features
+    customer_scaled = scaler.transform(customer_encoded)
+
+    # Predict
+    risk_score = model.predict_proba(customer_scaled)[0, 1]
+
+    # Categorize risk
+    risk_category = categorize_risk(risk_score)
+
+    return risk_score, risk_category
+
+# Example usage of risk scoring function
+print("\n" + "="*60)
+print("EXAMPLE: SCORING NEW CUSTOMER RISK")
+print("="*60)
+
+# Example customer data (using actual column names from the dataset)
+example_customer = {
+    'gender': 'Female',
+    'SeniorCitizen': 1,
+    'Partner': 'No',
+    'Dependents': 'No',
+    'tenure': 2,
+    'PhoneService': 'Yes',
+    'MultipleLines': 'No',
+    'InternetService': 'Fiber optic',
+    'OnlineSecurity': 'No',
+    'OnlineBackup': 'No',
+    'DeviceProtection': 'No',
+    'TechSupport': 'No',
+    'StreamingTV': 'Yes',
+    'StreamingMovies': 'Yes',
+    'Contract': 'Month-to-month',
+    'PaperlessBilling': 'Yes',
+    'PaymentMethod': 'Electronic check',
+    'MonthlyCharges': 88.15,
+    'TotalCharges': 176.30
+}
+
+risk_score, risk_category = score_customer_risk(
+    example_customer, lr_model, scaler, X.columns, binary_mappings
+)
+
+print("Example Customer Profile:")
+for key, value in example_customer.items():
+    print(f"  {key}: {value}")
+
+print(f"\nRisk Assessment:")
+print(f"  Churn Probability: {risk_score:.3f} ({risk_score:.1%})")
+print(f"  Risk Category: {risk_category}")
+
+# Model Insights and Business Recommendations
+print("\n" + "="*60)
+print("MODEL INSIGHTS AND BUSINESS RECOMMENDATIONS")
+print("="*60)
+
+print("📊 Model Performance Summary:")
+print(f"   • Overall Accuracy: {accuracy:.1%}")
+print(f"   • Precision (of predicted churners): {precision:.1%}")
+print(f"   • Recall (of actual churners caught): {recall:.1%}")
+print(f"   • AUC Score: {auc_score:.3f} (Good discriminative ability)")
+
+print("\n🔍 Key Churn Risk Factors (Top 5):")
+top_risk_factors = feature_importance.head(5)
+for i, (_, row) in enumerate(top_risk_factors.iterrows(), 1):
+    direction = "↑ Increases" if row['coefficient'] > 0 else "↓ Decreases"
+    print(f"   {i}. {row['feature']}: {direction} churn risk")
+
+print("\n🎯 Business Recommendations:")
+
+# Extract insights from top features
+top_features = feature_importance.head(10)
+recommendations = []
+
+for _, row in top_features.iterrows():
+    feature = row['feature']
+    coef = row['coefficient']
+
+    if 'Contract_Month-to-month' in feature and coef > 0:
+        recommendations.append("Target month-to-month customers for long-term contract conversions")
+    elif 'PaymentMethod_Electronic check' in feature and coef > 0:
+        recommendations.append("Incentivize customers to switch from electronic check payments")
+    elif 'InternetService_Fiber optic' in feature and coef > 0:
+        recommendations.append("Improve fiber optic service quality and customer satisfaction")
+    elif 'tenure' in feature and coef < 0:
+        recommendations.append("Focus on new customer onboarding and early engagement programs")
+    elif 'TotalCharges' in feature and coef < 0:
+        recommendations.append("Develop loyalty programs for high-value, long-term customers")
+
+# Remove duplicates and limit to top recommendations
+recommendations = list(dict.fromkeys(recommendations))[:5]
+
+for i, rec in enumerate(recommendations, 1):
+    print(f"   {i}. {rec}")
+
+print(f"\n💡 Implementation Strategy:")
+print(f"   • Set up automated alerts for customers with >70% churn probability")
+print(f"   • Prioritize retention efforts on high-risk, high-value customers")
+print(f"   • A/B test retention campaigns on predicted medium-risk customers")
+print(f"   • Monitor model performance monthly and retrain quarterly")
+print(f"   • Track the business impact of retention efforts on predicted churners")
+
+print(f"\n📈 Expected Business Impact:")
+total_customers = len(y_test)
+high_risk_customers = (y_pred_proba >= 0.7).sum()
+potential_revenue_at_risk = high_risk_customers * df['MonthlyCharges'].mean() * 12
+
+print(f"   • High-risk customers identified: {high_risk_customers} ({high_risk_customers/total_customers:.1%})")
+print(f"   • Potential annual revenue at risk: ${potential_revenue_at_risk:,.0f}")
+print(f"   • If 25% of high-risk customers are retained: ${potential_revenue_at_risk*0.25:,.0f} saved")
